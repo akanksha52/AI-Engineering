@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
+import os
+import regex as re
 
 import numpy.typing as npt
 import torch
@@ -562,31 +564,55 @@ def get_tokenizer(
     raise NotImplementedError
 
 
-def run_train_bpe(
-    input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str],
-    **kwargs,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    """Given the path to an input corpus, run train a BPE tokenizer and
-    output its vocabulary and merges.
+def run_train_bpe(input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str], **kwargs,) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    with open(input_path, "r", encoding="utf-8") as f:
+      text = f.read()
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    merges = []
+    freq_words = {}
+    special_pattern = "|".join(re.escape(token) for token in special_tokens)
+    documents = re.split(special_pattern, text)
+    for document in documents:
+      for match in re.finditer(PAT, document):
+          piece = match.group()
+          if piece not in freq_words:
+              freq_words[piece] = 0
+          freq_words[piece] += 1
+    word_tokens = {}
+    for word in freq_words:
+        word_tokens[word] = list(word.encode("utf-8"))
+    vocab = {}
+    for i in range(256):
+        vocab[i] = bytes([i])
+    for token in special_tokens:
+        vocab[len(vocab)] = token.encode("utf-8")
+    code = len(vocab)
+    while len(vocab) < vocab_size:
+        pair_count = {}
+        for word, freq in freq_words.items():
+            tokens = word_tokens[word]
+            for j in range(len(tokens) - 1):
+                pair = (tokens[j], tokens[j + 1])
+                if pair not in pair_count:
+                    pair_count[pair] = 0
+                pair_count[pair] += freq
+        pair = max(pair_count, key=lambda p: (pair_count[p], vocab[p[0]], vocab[p[1]]))
+        vocab[code] = vocab[pair[0]] + vocab[pair[1]]
+        merges.append((vocab[pair[0]], vocab[pair[1]]))
+        print(pair, "->", code, vocab[code])
+        for word in word_tokens:
+            tokens = word_tokens[word]
+            new_tokens = []
+            j = 0
+            while j < len(tokens):
+                if j < len(tokens) - 1 and tokens[j] == pair[0] and tokens[j + 1] == pair[1]:
+                    new_tokens.append(code)
+                    j += 2
+                else:
+                    new_tokens.append(tokens[j])
+                    j += 1
+            word_tokens[word] = new_tokens
+        code += 1
+    return (vocab, merges)
 
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
-
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
-    """
-    raise NotImplementedError
+#uv run pytest tests/test_train_bpe.py -k test_train_bpe
